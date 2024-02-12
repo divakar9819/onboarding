@@ -55,4 +55,11 @@ public class GlobalExceptionHandler {
         ApiResponse apiResponse = new ApiResponse(message,false);
         return new ResponseEntity<>(apiResponse, HttpStatus.SERVICE_UNAVAILABLE);
     }
+
+    @ExceptionHandler(WalletActivatedException.class)
+    public ResponseEntity<ApiResponse> handleWalletActivatedException(WalletActivatedException ex){
+        String message = ex.getMessage();
+        ApiResponse apiResponse = new ApiResponse(message,false);
+        return new ResponseEntity<>(apiResponse, HttpStatus.SERVICE_UNAVAILABLE);
+    }
 }

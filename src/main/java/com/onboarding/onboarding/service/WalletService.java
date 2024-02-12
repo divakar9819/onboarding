@@ -21,4 +21,6 @@ public interface WalletService {
     public Mono<ApiResponse> doKyc(KycDataRequest kycDataRequest);
     public Mono<ValidTokenResponse> validateToken(String token);
 
+    public Mono<WalletResponse> createVpa();
+
 }
