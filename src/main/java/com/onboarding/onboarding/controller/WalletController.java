@@ -1,11 +1,9 @@
 package com.onboarding.onboarding.controller;
 
 import com.onboarding.onboarding.entity.Wallet;
-import com.onboarding.onboarding.exception.GlobalException;
-import com.onboarding.onboarding.exception.ResourceNotFoundException;
-import com.onboarding.onboarding.exception.ValidationErrorException;
-import com.onboarding.onboarding.exception.WalletActivatedException;
+import com.onboarding.onboarding.exception.*;
 import com.onboarding.onboarding.payload.request.KycDataRequest;
+import com.onboarding.onboarding.payload.request.WalletRequest;
 import com.onboarding.onboarding.payload.response.ApiResponse;
 import com.onboarding.onboarding.payload.response.WalletResponse;
 import com.onboarding.onboarding.service.WalletService;
@@ -66,5 +64,19 @@ public class WalletController {
                         throw new GlobalException(error.getMessage());
                     }
                 });
+    }
+
+    @PostMapping("/activateCard")
+    public Mono<ResponseEntity<WalletResponse>> activateCard(@RequestBody WalletRequest walletRequest){
+        return walletService.activateCard(walletRequest)
+                .map(walletResponse -> ResponseEntity.status(HttpStatus.CREATED).body(walletResponse))
+                .onErrorResume(throwable -> {
+                    if (throwable instanceof CardAlreadyActivatedException) {
+                        return Mono.just(ResponseEntity.status(HttpStatus.CONFLICT).build());
+                    } else {
+                        return Mono.error(throwable);
+                    }
+                })
+                .defaultIfEmpty(ResponseEntity.status(HttpStatus.NOT_FOUND).build());
     }
 }

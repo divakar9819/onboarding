@@ -62,4 +62,11 @@ public class GlobalExceptionHandler {
         ApiResponse apiResponse = new ApiResponse(message,false);
         return new ResponseEntity<>(apiResponse, HttpStatus.SERVICE_UNAVAILABLE);
     }
+
+    @ExceptionHandler(CardAlreadyActivatedException.class)
+    public ResponseEntity<ApiResponse> handleCardActivatedException(CardAlreadyActivatedException ex){
+        String message = ex.getMessage();
+        ApiResponse apiResponse = new ApiResponse(message,false);
+        return new ResponseEntity<>(apiResponse, HttpStatus.SERVICE_UNAVAILABLE);
+    }
 }

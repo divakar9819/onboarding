@@ -4,31 +4,27 @@ import com.mongodb.DuplicateKeyException;
 import com.mongodb.MongoWriteException;
 import com.onboarding.onboarding.entity.KycData;
 import com.onboarding.onboarding.entity.Wallet;
-import com.onboarding.onboarding.entity.WalletAccount;
 import com.onboarding.onboarding.exception.*;
 import com.onboarding.onboarding.payload.request.KycDataRequest;
-import com.onboarding.onboarding.payload.response.ApiResponse;
-import com.onboarding.onboarding.payload.response.UserResponse;
-import com.onboarding.onboarding.payload.response.ValidTokenResponse;
-import com.onboarding.onboarding.payload.response.WalletResponse;
+import com.onboarding.onboarding.payload.request.WalletAccountRequest;
+import com.onboarding.onboarding.payload.request.WalletRequest;
+import com.onboarding.onboarding.payload.response.*;
 import com.onboarding.onboarding.repository.KycDataRepository;
-import com.onboarding.onboarding.repository.WalletAccountRepository;
 import com.onboarding.onboarding.repository.WalletRepository;
 import com.onboarding.onboarding.service.WalletService;
 import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
-import javax.validation.ConstraintViolation;
-import javax.xml.validation.Validator;
 import java.time.LocalDateTime;
-import java.util.Set;
 
+import static com.onboarding.onboarding.interceptor.AuthenticationInterceptor.getAuthToken;
 import static com.onboarding.onboarding.interceptor.AuthenticationInterceptor.getUsername;
 import static com.onboarding.onboarding.utils.Util.getRandomWalletId;
 
@@ -46,12 +42,14 @@ public class WalletServiceImpl implements WalletService {
     @Autowired
     private KycDataRepository kycDataRepository;
 
-    @Autowired
-    private WalletAccountRepository walletAccountRepository;
 
     @Autowired
     @Qualifier("getAuthWebClient")
-    private WebClient webClient;
+    private WebClient authWebClient;
+
+    @Autowired
+    @Qualifier("getTMWebClient")
+    private WebClient tmWebClient;
 
     @Autowired
     private ModelMapper modelMapper;
@@ -64,6 +62,7 @@ public class WalletServiceImpl implements WalletService {
         wallet.setStatus("pending");
         wallet.setKycStatus("pending");
         wallet.setUsername(getUsername());
+        wallet.setCardStatus("pending");
        return  walletRepository.save(wallet)
                .flatMap(savedWallet -> walletToWalletResponse(Mono.just(savedWallet)))
                .onErrorResume(throwable -> {
@@ -84,50 +83,42 @@ public class WalletServiceImpl implements WalletService {
 
     @Override
     public Mono<ApiResponse> doKyc(KycDataRequest kycDataRequest) {
-        String username = getUsername();
-        WalletResponse walletResponse = getWalletByUsername(username).block();
-        if(walletResponse.getKycStatus().equalsIgnoreCase("pending")){
-            KycData kycData = new KycData();
-            kycData.setWalletId(walletResponse.getWalletId());
-            kycData.setName(kycDataRequest.getName());
-            kycData.setAddress(kycDataRequest.getAddress());
-            kycDataRepository.save(kycData)
-                    .onErrorResume(throwable -> {
-                        if (throwable instanceof DuplicateKeyException || throwable instanceof MongoWriteException) {
-                            return Mono.error(new ValidationErrorException(throwable.getMessage()));
-                        } else {
-                            return Mono.error(throwable);
-                        }
-                    })
-                    .subscribe();
-            Wallet wallet = walletResponseToWallet(walletResponse);
-            wallet.setKycStatus("completed");
-            wallet.setState("vpa");
-            walletRepository.save(wallet)
-                    .onErrorResume(throwable -> {
-                        if (throwable instanceof DuplicateKeyException || throwable instanceof MongoWriteException) {
-                            return Mono.error(new ValidationErrorException(throwable.getMessage()));
-                        } else {
-                            return Mono.error(throwable);
-                        }
-                    })
-                    .subscribe();
+    String username = getUsername();
+    return getWalletByUsername(username)
+        .flatMap(walletResponse -> {
+            if (walletResponse.getKycStatus().equalsIgnoreCase("pending")) {
+                KycData kycData = new KycData();
+                kycData.setWalletId(walletResponse.getWalletId());
+                kycData.setName(kycDataRequest.getName());
+                kycData.setAddress(kycDataRequest.getAddress());
 
-            ApiResponse apiResponse = new ApiResponse("Kyc done successfully",true);
-            return Mono.just(apiResponse);
-        }
-        if(walletResponse.getKycStatus().equalsIgnoreCase("completed")){
-            ApiResponse apiResponse = new ApiResponse("User kyc already done",true);
-            return Mono.just(apiResponse);
-        }
-        else {
-            throw new GlobalException("Global exception");
-        }
-    }
+                return kycDataRepository.save(kycData)
+                    .then(Mono.defer(() -> {
+                        Wallet wallet = walletResponseToWallet(walletResponse);
+                        wallet.setKycStatus("completed");
+                        wallet.setState("vpa");
+                        wallet.setUsername(username);
+                        return walletRepository.save(wallet);
+                    }))
+                    .map(savedWallet -> new ApiResponse("Kyc done successfully", true))
+                    .onErrorResume(throwable -> {
+                        if (throwable instanceof DuplicateKeyException || throwable instanceof MongoWriteException) {
+                            return Mono.error(new ValidationErrorException(throwable.getMessage()));
+                        } else {
+                            return Mono.error(throwable);
+                        }
+                    });
+            } else if (walletResponse.getKycStatus().equalsIgnoreCase("completed")) {
+                return Mono.just(new ApiResponse("User kyc already done", true));
+            } else {
+                return Mono.error(new GlobalException("Invalid kyc status"));
+            }
+        });
+}
 
     @Override
     public Mono<ValidTokenResponse> validateToken(String token) {
-        return webClient.post().uri("/validateToken")
+        return authWebClient.post().uri("/validateToken")
                 .body(Mono.just(token),String.class)
                 .retrieve()
                 .onStatus(HttpStatusCode::is4xxClientError, clientResponse ->
@@ -149,7 +140,7 @@ public class WalletServiceImpl implements WalletService {
     }
 
     public Mono<UserResponse> getUserByUsername(String username){
-        return webClient.get().uri("/getUserByUsername/"+username)
+        return authWebClient.get().uri("/getUserByUsername/"+username)
                 .retrieve()
                 .onStatus(HttpStatusCode::is4xxClientError,clientResponse ->
                         Mono.error(new ResourceNotFoundException("User not found "))
@@ -168,87 +159,114 @@ public class WalletServiceImpl implements WalletService {
                 .bodyToMono(UserResponse.class);
     }
 
-    @Override
-    public Mono<WalletResponse> createVpa() {
-        String username = getUsername();
-        Mono<UserResponse> userResponse = getUserByUsername(username)
-                .onErrorResume(throwable -> {
-                    if (throwable instanceof ResourceNotFoundException) {
-                        return Mono.error(throwable);
-                    } else if (throwable instanceof ServerErrorException || throwable instanceof ConnectionRefusedException) {
-                        return Mono.error(throwable);
-                    } else {
-                        return Mono.error(new GlobalException("Global exception"));
-                    }
-                });
-
-        UserResponse user = new UserResponse();
-        userResponse
-                .flatMap(user1 -> {
-                    System.out.println(user1);
-                    user.setEmail(user1.getEmail());
-                    user.setMobileNumber(user1.getMobileNumber());
-                    return Mono.just(user1);
-                })
-                .switchIfEmpty(Mono.error(new ResourceNotFoundException("User not found")))
-                .onErrorResume(throwable -> {
-                    if (throwable instanceof ResourceNotFoundException) {
-                        return Mono.error(throwable);
-                    } else if (throwable instanceof ServerErrorException || throwable instanceof ConnectionRefusedException) {
-                        return Mono.error(throwable);
-                    } else {
-                        return Mono.error(new GlobalException("Global exception"));
-                    }
-                }).subscribe();
-
-        Mono<WalletResponse> walletResponse = getWalletByUsername(username);
-        return walletResponse
-                .flatMap(walletResponse1 -> {
-                    if(walletResponse1.getState().equalsIgnoreCase("vpa")){
-                        Wallet wallet = walletResponseToWallet(walletResponse1);
-                        wallet.setVpa(user.getMobileNumber()+"@mypsp");
-                        wallet.setState("active");
-                        wallet.setStatus("completed");
-                        Mono<Wallet> createdWallet =  walletRepository.save(wallet)
-                                .onErrorResume(throwable -> {
-                                    if (throwable instanceof DuplicateKeyException || throwable instanceof MongoWriteException) {
-                                        return Mono.error(new ValidationErrorException(throwable.getMessage()));
-                                    } else {
-                                        return Mono.error(throwable);
-                                    }});
-                        WalletAccount walletAccount = new WalletAccount();
-                        Mono<KycData> kycData = getKycData(walletResponse1.getWalletId())
-                                .onErrorResume(throwable -> {
-                                    if(throwable instanceof ResourceNotFoundException){
-                                        return Mono.error(throwable);
-                                    }
-                                    else {
-                                        return Mono.error(throwable);
-                                    }
-                                });
-                        kycData
-                                .flatMap(kycData1 -> {
-                                    System.out.println(kycData1);
-                                    walletAccount.setName(kycData1.getName());
-                                    walletAccount.setWalletId(walletResponse1.getWalletId());
-                                    walletAccount.setAccountNumber(user.getMobileNumber()+walletResponse1.getWalletId());
-                                    walletAccount.setVpa(wallet.getVpa());
-                                    walletAccount.setBalance(0.0);
-                                    LocalDateTime localDateTime = LocalDateTime.now();
-                                    walletAccount.setCreatedAt(localDateTime);
-                                    walletAccount.setUpdatedAt(localDateTime);
-                                    walletAccountRepository.save(walletAccount);
-                                    return Mono.just(kycData1);
-                                })
-                                .subscribe();
-                        return walletToWalletResponse(createdWallet);
+    public Mono<WalletAccountResponse> createWalletAccount(WalletAccountRequest walletAccountRequest){
+        return tmWebClient.post().uri("/createWallet")
+                .body(Mono.just(walletAccountRequest),WalletAccountRequest.class)
+                .header(HttpHeaders.AUTHORIZATION, getAuthToken())
+                .retrieve()
+                .onStatus(HttpStatusCode::is4xxClientError, clientResponse ->
+                        Mono.error(new InvalidTokenException("Invalid token"))
+                )
+                .onStatus(HttpStatusCode::is5xxServerError, clientResponse ->
+                        Mono.error(new ServerErrorException("Server error"))
+                )
+                .onStatus(HttpStatusCode :: isError, clientResponse -> {
+                    if(clientResponse.statusCode()== HttpStatus.SERVICE_UNAVAILABLE){
+                        return Mono.error(new ConnectionRefusedException("Connection refused"));
                     }
                     else {
-                        return Mono.error(new WalletActivatedException("Wallet already activated"));
+                        return  clientResponse.createException();
                     }
                 })
-                .switchIfEmpty(Mono.error(new ResourceNotFoundException("Wallet not found")));
+                .bodyToMono(WalletAccountResponse.class);
+    }
 
+    @Override
+    public Mono<WalletResponse> createVpa() {
+    String username = getUsername();
+    return getWalletByUsername(username)
+        .flatMap(walletResponse -> {
+            if (walletResponse.getState().equalsIgnoreCase("vpa")) {
+                return getKycData(walletResponse.getWalletId())
+                    .flatMap(kycData -> {
+                        WalletAccountRequest walletAccountRequest = new WalletAccountRequest();
+                        walletAccountRequest.setWalletId(walletResponse.getWalletId());
+                        walletAccountRequest.setName(kycData.getName());
+                        return createWalletAccount(walletAccountRequest)
+                            .flatMap(walletAccountResponse -> {
+                                if (walletAccountResponse.getVpa() != null && walletAccountResponse.getBalance() == 0.0) {
+                                    Wallet wallet = walletResponseToWallet(walletResponse);
+                                    wallet.setVpa(walletAccountResponse.getVpa());
+                                    wallet.setState("active");
+                                    wallet.setStatus("completed");
+                                    return walletRepository.save(wallet)
+                                        .map(createdWallet -> {
+                                            System.out.println(createdWallet);
+                                            WalletResponse createdWalletResponse = new WalletResponse();
+                                            createdWalletResponse.setId(createdWallet.getId());
+                                            createdWalletResponse.setWalletId(createdWallet.getWalletId());
+                                            createdWalletResponse.setVpa(createdWallet.getVpa());
+                                            createdWalletResponse.setKycStatus(createdWallet.getKycStatus());
+                                            createdWalletResponse.setName(kycData.getName());
+                                            createdWalletResponse.setStatus(createdWallet.getStatus());
+                                            createdWalletResponse.setState(createdWallet.getState());
+                                            createdWalletResponse.setUsername(createdWallet.getUsername());
+                                            return createdWalletResponse;
+                                        })
+                                        .onErrorResume(throwable -> {
+                                            if (throwable instanceof DuplicateKeyException || throwable instanceof MongoWriteException) {
+                                                return Mono.error(new ValidationErrorException(throwable.getMessage()));
+                                            } else {
+                                                return Mono.error(throwable);
+                                            }
+                                        });
+                                } else {
+                                    return Mono.error(new Exception("Invalid VPA or balance"));
+                                }
+                            })
+                            .onErrorResume(throwable -> {
+                                return Mono.error(throwable);
+                            });
+                    })
+                    .onErrorResume(throwable -> {
+                        return Mono.error(throwable);
+                    });
+            } else {
+                return Mono.error(new WalletActivatedException("Wallet already activated"));
+            }
+        });
+    }
+
+    @Override
+    public Mono<WalletResponse> activateCard(WalletRequest walletRequest) {
+
+        return getWalletByUsername(walletRequest.getUsername())
+                .flatMap(walletResponse -> {
+                    if(walletResponse.getCardStatus().equalsIgnoreCase("pending")){
+                        return getKycData(walletResponse.getWalletId())
+                                .flatMap(kycData -> {
+                                    WalletResponse response = new WalletResponse();
+                                    response.setName(kycData.getName());
+                                    Wallet wallet = walletResponseToWallet(walletResponse);
+                                    wallet.setCardId(walletRequest.getCardId());
+                                    wallet.setCardStatus("activated");
+                                    return walletRepository.save(wallet)
+                                            .flatMap(updatedWallet -> {
+                                                response.setWalletId(updatedWallet.getWalletId());
+                                                response.setCardId(updatedWallet.getCardId());
+                                                response.setWalletId(updatedWallet.getWalletId());
+                                                response.setCardStatus(updatedWallet.getCardStatus());
+                                                return Mono.just(response);
+                                            })
+                                            .switchIfEmpty(Mono.error(new GlobalException("Getting error while saving data in wallet")));
+                                })
+                                .onErrorResume(Mono:: error );
+                    }
+                    else {
+                        return Mono.error(new CardAlreadyActivatedException("User card already activated"));
+                    }
+                })
+                .onErrorResume(Mono::error);
     }
 
     public Mono<KycData> getKycData(String walletId){
@@ -264,9 +282,9 @@ public class WalletServiceImpl implements WalletService {
                     if(throwable instanceof ResourceNotFoundException) {
                         return Mono.error(new ResourceNotFoundException("User kyc data not found"));
                     } else {
-                        return Mono.error(new GlobalException("Global exception"));
+                        return Mono.error(throwable);
                     }
-                });//
+                });
     }
 
     public Mono<WalletResponse> walletToWalletResponse(Mono<Wallet> wallet){

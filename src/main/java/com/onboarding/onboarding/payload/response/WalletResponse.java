@@ -17,9 +17,9 @@ public class WalletResponse {
     private String id;
     private String walletId;
     private String username;
+    private String name;
     private String cardId;
     private String kycStatus;
-    private double balance;
     private String cardStatus;
     private String vpa;
     private String state;

@@ -22,6 +22,9 @@ public class ConfigBean {
     @Value("${spring.card.service.baseurl}")
     private String cardServiceBaseurl;
 
+    @Value("${spring.tm.service.baseurl}")
+    private String tmServiceBaseurl;
+
     @Bean
     public ModelMapper modelMapper(){
         return new ModelMapper();
@@ -35,6 +38,11 @@ public class ConfigBean {
     @Bean
     public WebClient getCardWebClient(){
         return createWebClient(cardServiceBaseurl);
+    }
+
+    @Bean
+    public WebClient getTMWebClient(){
+        return createWebClient(tmServiceBaseurl);
     }
 
     public WebClient createWebClient(String baseurl){
